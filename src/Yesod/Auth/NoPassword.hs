@@ -28,7 +28,17 @@
 -- 1. Implement an instance of 'NoPasswordAuth' for your Yesod application.
 -- 2. Implement a Yesod form that resolves to an 'EmailForm'.
 -- 3. Add `authNoPassword` to your authentication plugins in your instance of
---    `YesodAuth`, passing the form you wish to use for authentication.
+--    `YesodAuth`, passing the form you wish to use for authentication. This
+--    typeclass provides a number of methods for customisation of behaviour,
+--    but the minimal implementation is:
+--
+--     * 'loginRoute'
+--     * 'emailSentRoute'
+--     * 'sendLoginEmail'
+--     * 'getUserByEmail'
+--     * 'getEmailAndHashByTokenId'
+--     * 'updateLoginHashForUser'
+--     * 'newUserWithLoginHash'
 
 module Yesod.Auth.NoPassword (
     -- * Plugin
