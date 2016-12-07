@@ -1,34 +1,48 @@
--- | An auth plugin for email-based passwordless registration.
+-- | This auth plugin for Yesod enabled simple passwordless authentication.
 --
--- Basic flow:
+-- The only detail required from a user is an email address, and accounts are
+-- either updated or created, depending on whether the account exists or not.
+-- To actually log in, users are sent an email containing a link that
+-- authenticates them and logs them in.
 --
--- * Enter email address
--- * If user does not exist, create in the database and add a login token.
--- * If the user does exist, write a login token to the database.
--- * Email the login token to the user.
--- * User opens the website from the login token and is authenticated.
+-- This plugin provides:
 --
--- Configuration:
+-- * Token generation
+-- * Orchestration of the login process and email sending
+-- * Receiving of the login form data via HTTP POST.
+-- * Authentication of users once they return to the site from an email
 --
--- * Post email handler (i.e. "We've sent you an email")
--- * Post login handler (i.e. returning from link in email)
+-- This plugin /does not/ provide:
 --
--- This plugin provides no "UI", it is up to the developer to create forms for
--- use in this login flow, and to POST those at the handlers provided here.
--- An EmailForm data type is provided, and this must be what the forms unwrap to.
+-- * A login form
+-- * Email rendering or sending
+-- * An account model
+-- * A viewable interface (i.e. via HTTP GET) for the login form
 --
--- If the form is successful, the user will be redirected to the route
--- specified in the NoPasswordAuth instance, otherwise they will be returned
--- back to the login route with an error message.
+-- These are left for the user of the plugin to implement so that they can
+-- retain control over form functionality, account models, email design and
+-- email service provider.
+--
+-- Implementation checklist:
+--
+-- 1. Implement an instance of 'NoPasswordAuth' for your Yesod application.
+-- 2. Implement a Yesod form that resolves to an 'EmailForm'.
+-- 3. Add `authNoPassword` to your authentication plugins in your instance of
+--    `YesodAuth`, passing the form you wish to use for authentication.
 
 module Yesod.Auth.NoPassword (
-    -- Plugin
+    -- * Plugin
       authNoPassword
-    -- Form Type
+    -- * Form Type
     , EmailForm(..)
-    -- Typeclass
+    -- * Typeclass
     , NoPasswordAuth(..)
-    -- Utility
+    -- * Types
+    , Email
+    , Token
+    , TokenId
+    , Hash
+    -- ** Utility
     , loginPostR
 ) where
 
@@ -54,7 +68,7 @@ import Crypto.PasswordStore
 pluginName :: Text
 pluginName = "email"
 
--- | Route to POST the login form at
+-- | Route to which the site should POST the email form form.
 loginPostR :: AuthRoute
 loginPostR = PluginR pluginName ["login"]
 
@@ -65,21 +79,25 @@ tokenStrength = 17 -- 2^tokenStrength hash rounds
 tokenParamName :: Text
 tokenParamName = "tkn"
 
+
 type Email = Text
 type Token = Text
 type TokenId = Text
 type Hash = Text
 
--- | Data type required for the form
+
+-- | Data type required for the Yesod form.
 data EmailForm = EmailForm
     { efEmail :: Email
     }
+
 
 -- Convenience alias for forms
 type Form m a = (Html -> MForm (HandlerT m IO) (FormResult a, WidgetT m IO ()))
 
 
--- | Yesod.Auth plugin defintion
+-- | Function to create the Yesod Auth plugin. Must be used by a type with an
+-- instance for 'NoPasswordAuth', and must be given a form to use.
 authNoPassword :: NoPasswordAuth m
                => Form m EmailForm
                -> AuthPlugin m
@@ -181,27 +199,45 @@ class YesodAuthPersist master => NoPasswordAuth master where
     -- the plugin.
     loginRoute :: master -> Route master
 
-    -- | Route to be sent after entering an email address. This is not
-    -- provided by the plugin. Note that the user will not be authenticated
-    -- when they reach the page.
+    -- | Route to which the user should be sent after entering an email
+    -- address. This is not provided by the plugin.
+    --
+    -- __Note__: the user will not be authenticated when they reach the page.
     emailSentRoute :: master -> Route master
 
-    -- | Send login email
-    sendLoginEmail :: Email -> Text -> HandlerT master IO ()
+    -- | Send a login email.
+    sendLoginEmail :: Email -- ^ The email to send to
+                   -> Text  -- ^ The URL that will log the user in
+                   -> HandlerT master IO ()
 
-    -- | Get a user by their email address
+    -- | Get a user by their email address. Used to determine if the user exists or not.
     getUserByEmail :: Email -> HandlerT master IO (Maybe (AuthId master))
 
-    -- | Get a Hash by its TokenId
+    -- | Get a Hash by a TokenId.
+    --
+    -- Invoked when the user returns to the site from an email. We don't know
+    -- who the user is at this point as they may open the link from the email
+    -- on another device or in another browser, so session data can't be used.
+    -- Equally we do not want to pass the user's ID or email address in a URL
+    -- if we don't have to, so instead we look up users by the 'TokenId' that
+    -- we issued them earlier in the process.
     getEmailAndHashByTokenId :: TokenId -> HandlerT master IO (Maybe (Email, Hash))
 
     -- | Update a user's login hash
-    -- This is also used to blank out the hash once the user has logged in, or to
-    -- prevent the user from logging in, so must accept a value of `Nothing`.
+    --
+    -- This is also used to blank out the hash once the user has logged in, or
+    -- can be used to prevent the user from logging in, so must accept a value
+    -- of `Nothing`.
+    --
+    -- /It is recommended that the/ 'TokenId' /storage be enforced as unique/.
+    -- For this reason, the token is not passed as a maybe, as some storage
+    -- backends treat `NULL` values as the same.
     updateLoginHashForUser :: (AuthId master) -> Maybe Hash -> TokenId -> HandlerT master IO ()
 
-    -- | Create a new user with an email address and hash
+    -- | Create a new user with an email address and hash.
     newUserWithLoginHash :: Email -> Hash -> TokenId -> HandlerT master IO ()
+
+    -- ** Optional methods
 
     {-
         MINIMAL loginRoute
