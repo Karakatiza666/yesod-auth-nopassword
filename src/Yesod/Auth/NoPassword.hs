@@ -83,9 +83,6 @@ loginPostR :: AuthRoute
 loginPostR = PluginR pluginName ["login"]
 
 
-tokenStrength :: Int
-tokenStrength = 17 -- 2^tokenStrength hash rounds
-
 tokenParamName :: Text
 tokenParamName = "tkn"
 
@@ -135,7 +132,8 @@ postEmailR form = do
             lift $ redirect (emailSentRoute master)
         FormSuccess e -> do
             let email = efEmail e
-            (hash, token) <- liftIO $ genToken
+            strength <- lift $ tokenStrength
+            (hash, token) <- liftIO $ genToken strength
             muser <- lift $ getUserByEmail (efEmail e)
             tid <- liftIO genTokenId
             case muser of
@@ -173,11 +171,11 @@ unpackTokenParam param =
             _ -> Nothing
 
 
-genToken :: IO (Hash, Token)
-genToken = do
+genToken :: Int -> IO (Hash, Token)
+genToken strength = do
     tokenSalt <- genSaltIO
     let token = exportSalt tokenSalt
-    hash <- makePassword token tokenStrength
+    hash <- makePassword token strength
     return (decodeUtf8 hash, decodeUtf8 (urlEncode False token))
 
 
@@ -247,7 +245,11 @@ class YesodAuthPersist master => NoPasswordAuth master where
     -- | Create a new user with an email address and hash.
     newUserWithLoginHash :: Email -> Hash -> TokenId -> HandlerT master IO ()
 
-    -- ** Optional methods
+    -- | __Optional__ – return a custom token strength.
+    --
+    -- A token strength of @x@ equates to @2^x@ hash rounds.
+    tokenStrength :: HandlerT master IO Int
+    tokenStrength = return 17
 
     {-
         MINIMAL loginRoute
