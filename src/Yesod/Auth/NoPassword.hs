@@ -163,12 +163,11 @@ getLoginR = do
 
 
 unpackTokenParam :: Maybe Text -> Maybe (TokenId, Token)
-unpackTokenParam param =
-    case param of
-        Nothing -> Nothing
-        Just p -> case (splitOn ":" p) of
-            (tid:tkn:[]) -> Just (tid, tkn)
-            _ -> Nothing
+unpackTokenParam param = do
+    p <- param
+    case (splitOn ":" p) of
+        (tid:tkn:[]) -> Just (tid, tkn)
+        _ -> Nothing
 
 
 genToken :: Int -> IO (Hash, Token)
