@@ -83,10 +83,6 @@ loginPostR :: AuthRoute
 loginPostR = PluginR pluginName ["login"]
 
 
-tokenParamName :: Text
-tokenParamName = "tkn"
-
-
 type Email = Text
 type Token = Text
 type TokenId = Text
@@ -149,7 +145,8 @@ postEmailR form = do
 
 getLoginR :: NoPasswordAuth m => HandlerT Auth (HandlerT m IO) TypedContent
 getLoginR = do
-    loginParam <- lookupGetParam tokenParamName
+    paramName <- lift tokenParamName
+    loginParam <- lookupGetParam paramName
     case (unpackTokenParam loginParam) of
         Nothing -> permissionDenied "Missing login token"
         Just (tid, loginToken) -> do
@@ -189,14 +186,13 @@ genTokenId :: IO TokenId
 genTokenId = U.toText <$> U.nextRandom
 
 
-genUrl :: Token -> TokenId -> HandlerT Auth (HandlerT m IO) Text
+genUrl :: NoPasswordAuth m => Token -> TokenId -> HandlerT Auth (HandlerT m IO) Text
 genUrl token tid = do
     tm <- getRouteToParent
     render <- lift getUrlRender
-    return $ (render $ tm loginPostR) <> genQuery
-    where
-        genParam = tid <> ":" <> token
-        genQuery = "?" <> tokenParamName <> "=" <> genParam
+    paramName <- lift tokenParamName
+    let query = "?" <> paramName <> "=" <> tid <> ":" <> token
+    return $ (render $ tm loginPostR) <> query
 
 
 class YesodAuthPersist master => NoPasswordAuth master where
@@ -247,6 +243,10 @@ class YesodAuthPersist master => NoPasswordAuth master where
     -- A token strength of @x@ equates to @2^x@ hash rounds.
     tokenStrength :: HandlerT master IO Int
     tokenStrength = return 17
+
+    -- | __Optional__ – return a custom token param name.
+    tokenParamName :: HandlerT master IO Text
+    tokenParamName = return "tkn"
 
     {-
         MINIMAL loginRoute
