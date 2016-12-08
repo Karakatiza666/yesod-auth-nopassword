@@ -94,7 +94,7 @@ type Hash = Text
 
 
 -- | Data type required for the Yesod form.
-data EmailForm = EmailForm
+newtype EmailForm = EmailForm
     { efEmail :: Email
     }
 
