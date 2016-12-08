@@ -187,9 +187,7 @@ verifyToken hash token = verifyPassword t h
 
 
 genTokenId :: IO TokenId
-genTokenId = do
-    uuid <- U.nextRandom
-    return $ U.toText uuid
+genTokenId = U.toText <$> U.nextRandom
 
 
 genUrl :: Token -> TokenId -> HandlerT Auth (HandlerT m IO) Text
