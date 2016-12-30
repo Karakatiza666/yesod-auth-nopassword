@@ -172,7 +172,7 @@ genToken strength = do
     tokenSalt <- genSaltIO
     let token = exportSalt tokenSalt
     hash <- makePassword token strength
-    return (decodeUtf8 hash, decodeUtf8 (urlEncode False token))
+    return (decodeUtf8 hash, decodeUtf8 (urlEncode True token))
 
 
 verifyToken :: Hash -> Token -> Bool
