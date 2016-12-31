@@ -137,7 +137,6 @@ postEmailR form = do
                     lift $ updateLoginHashForUser user (Just hash) tid
                 Nothing ->
                     lift $ newUserWithLoginHash email hash tid
-            setMessage $ B.text "Check your email for a login link"
             url <- genUrl token tid
             lift $ sendLoginEmail email url
             lift $ redirect (emailSentRoute master)
