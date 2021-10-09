@@ -1,3 +1,12 @@
+{-# LANGUAGE TypeFamilies #-}
+--{-# LANGUAGE ExplicitForAll #-}
+{-# LANGUAGE RankNTypes #-}
+--{-# LANGUAGE PartialTypeSignatures #-}
+--{-# LANGUAGE FlexibleContexts #-}
+--{-# LANGUAGE ImpredicativeTypes #-}
+{-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+
 -- | This auth plugin for Yesod enabled simple passwordless authentication.
 --
 -- The only detail required from a user is an email address, and accounts are
@@ -33,7 +42,7 @@
 --    but the minimal implementation is:
 --
 --     * 'loginRoute'
---     * 'emailSentRoute'
+--     * 'emailSentTarget'
 --     * 'sendLoginEmail'
 --     * 'getUserByEmail'
 --     * 'getEmailAndHashByTokenId'
@@ -58,6 +67,7 @@ module Yesod.Auth.NoPassword (
 
 import Prelude
 
+import Data.Foldable (traverse_)
 import Data.Monoid ((<>))
 import Data.Text
 import Data.Text.Encoding (encodeUtf8, decodeUtf8)
@@ -67,6 +77,7 @@ import qualified Data.UUID as U
 import qualified Data.UUID.V4 as U
 
 import Network.HTTP.Types.URI (urlEncode, urlDecode)
+import Network.HTTP.Types.Status (badRequest400)
 
 import Yesod.Core
 import Yesod.Form
@@ -94,77 +105,87 @@ newtype EmailForm = EmailForm
     { efEmail :: Email
     }
 
-
 -- Convenience alias for forms
-type Form m a = (Html -> MForm (HandlerT m IO) (FormResult a, WidgetT m IO ()))
-
+type Form master a = (Html -> MForm (HandlerFor master)  (FormResult a, WidgetFor master ()))
+--type Form master a = forall m. master ~ HandlerSite m => (Html -> MForm m (FormResult a, WidgetFor master ()))
 
 -- | Function to create the Yesod Auth plugin. Must be used by a type with an
 -- instance for 'NoPasswordAuth', and must be given a form to use.
-authNoPassword :: NoPasswordAuth m
-               => Form m EmailForm
-               -> AuthPlugin m
+authNoPassword :: forall master m. (NoPasswordAuth master, HandlerFor master ~ m)
+               => Form master EmailForm
+               -> AuthPlugin master
 authNoPassword form = AuthPlugin pluginName dispatch login
     where
         login _ = error "NoPasswordAuth does not provide a login widget"
-
+        dispatch :: Text -> [Text] -> AuthHandler master TypedContent
         dispatch "POST" ["login"] = postEmailR form
         dispatch "GET"  ["login"] = getLoginR
         dispatch _ _ = notFound
 
-
-postEmailR :: NoPasswordAuth m
-           => Form m EmailForm
-           -> HandlerT Auth (HandlerT m IO) TypedContent
+postEmailR :: forall master m. (NoPasswordAuth master, HandlerFor master ~ m)
+           => Form master EmailForm -> AuthHandler master TypedContent
 postEmailR form = do
-    ((result, _), _) <- lift $ runFormPost form
-    master <- lift getYesod
-    case result of
-        FormMissing -> do
-            setMessage "Something went wrong, please try again"
-            lift $ redirect (emailSentRoute master)
-        FormFailure as -> do
+    ((result, _), _) <- liftHandler $ runFormPost form
+    master <- liftHandler getYesod
+    let msg = "Something went wrong, please try again"
+    case (result, emailSentTarget master) of
+        (FormMissing, Left route) -> do
+            setMessage $ B.text msg
+            liftHandler $ redirect route
+        (FormMissing, Right errorResponse) ->
+            liftHandler $ sendResponseStatus badRequest400 $ errorResponse [msg]
+        (FormFailure as, Left route) -> do
             mapM_ (setMessage . B.text) as
-            lift $ redirect (emailSentRoute master)
-        FormSuccess e -> do
+            liftHandler $ redirect route
+        (FormFailure as, Right errorResponse) ->
+            liftHandler $ sendResponseStatus badRequest400 $ errorResponse as
+        (FormSuccess e, Left route) -> do
+            onFormSuccess e
+            liftHandler $ redirect route
+        (FormSuccess e, _) -> do
+            onFormSuccess e
+            sendResponse ()
+    where
+        onFormSuccess :: forall master m. (NoPasswordAuth master, HandlerFor master ~ m) =>
+                         EmailForm -> AuthHandler master ()
+        onFormSuccess e = do
             let email = efEmail e
-            strength <- lift $ tokenStrength
+            strength <- liftHandler tokenStrength
             (hash, token) <- liftIO $ genToken strength
-            muser <- lift $ getUserByEmail (efEmail e)
+            muser <- liftHandler $ getUserByEmail (efEmail e)
             tid <- liftIO genTokenId
             case muser of
                 Just user ->
-                    lift $ updateLoginHashForUser user (Just hash) tid
+                    liftHandler $ updateLoginHashForUser user (Just hash) tid
                 Nothing ->
-                    lift $ newUserWithLoginHash email hash tid
-            url <- genUrl token tid
-            lift $ sendLoginEmail email url
-            lift $ redirect (emailSentRoute master)
+                    liftHandler $ newUserWithLoginHash email hash tid
+            referer <- liftHandler $ lookupGetParam =<< refererParamName
+            url <- genUrl token tid referer
+            liftHandler $ sendLoginEmail email url
 
-
-getLoginR :: NoPasswordAuth m => HandlerT Auth (HandlerT m IO) TypedContent
+getLoginR :: NoPasswordAuth master => AuthHandler master TypedContent
 getLoginR = do
-    paramName <- lift tokenParamName
-    loginParam <- lookupGetParam paramName
-    case (unpackTokenParam loginParam) of
+    loginParam <- lookupGetParam =<< liftHandler tokenParamName
+    case unpackTokenParam loginParam of
         Nothing -> permissionDenied "Missing login token"
         Just (tid, loginToken) -> do
-            muser <- lift $ getEmailAndHashByTokenId tid
+            muser <- liftHandler $ getEmailAndHashByTokenId tid
             case muser of
                 Nothing -> permissionDenied "No login token sent"
                 Just (email, hash) ->
-                    if (verifyToken hash loginToken)
-                        then lift $ setCredsRedirect (Creds pluginName email [])
+                    if verifyToken hash loginToken
+                        then liftHandler $ do
+                            redirectTarget <- lookupGetParam =<< redirectParamName
+                            traverse_ setUltDest redirectTarget
+                            setCredsRedirect (Creds pluginName email [])
                         else permissionDenied "Incorrect login token"
-
 
 unpackTokenParam :: Maybe Text -> Maybe (TokenId, Token)
 unpackTokenParam param = do
     p <- param
-    case (splitOn ":" p) of
-        (tid:tkn:[]) -> Just (tid, tkn)
+    case splitOn ":" p of
+        [tid,tkn] -> Just (tid, tkn)
         _ -> Nothing
-
 
 genToken :: Int -> IO (Hash, Token)
 genToken strength = do
@@ -173,45 +194,47 @@ genToken strength = do
     hash <- makePassword token strength
     return (decodeUtf8 hash, decodeUtf8 (urlEncode True token))
 
-
 verifyToken :: Hash -> Token -> Bool
 verifyToken hash token = verifyPassword t h
     where
         h = encodeUtf8 hash
         t = urlDecode False (encodeUtf8 token)
 
-
 genTokenId :: IO TokenId
 genTokenId = U.toText <$> U.nextRandom
 
-
-genUrl :: NoPasswordAuth m => Token -> TokenId -> HandlerT Auth (HandlerT m IO) Text
-genUrl token tid = do
+genUrl :: NoPasswordAuth master => Token -> TokenId -> Maybe Text -> AuthHandler master Text
+genUrl token tid referer = do
     tm <- getRouteToParent
-    render <- lift getUrlRender
-    paramName <- lift tokenParamName
-    let query = "?" <> paramName <> "=" <> tid <> ":" <> token
-    return $ (render $ tm loginPostR) <> query
-
+    render <- liftHandler getUrlRender
+    tokenName <- liftHandler tokenParamName
+    redirectName <- liftHandler redirectParamName
+    let refererParam = maybe "" (("&" <> redirectName <> "=") <>) referer
+    let query = "?" <> tokenName <> "=" <> tid <> ":" <> token <> refererParam
+    return $ render (tm loginPostR) <> query
 
 class YesodAuthPersist master => NoPasswordAuth master where
     -- | Route to a page that dispays a login form. This is not provided by
     -- the plugin.
     loginRoute :: master -> Route master
 
-    -- | Route to which the user should be sent after entering an email
+    -- TODO: add deprecated function emailSentTarget that is replaced by emailSentTarget
+    -- | EITHER: route to which the user should be sent after entering an email
     -- address. This is not provided by the plugin.
+    -- OR: Function to make return value containing error messages should any occur.
+    -- Then, in case of success simple HTTP status 200 will be returned
+    -- and in case of error - HTTP bad request 400 with error value
     --
     -- __Note__: the user will not be authenticated when they reach the page.
-    emailSentRoute :: master -> Route master
+    emailSentTarget :: master -> Either (Route master) ([Text] -> TypedContent)
 
     -- | Send a login email.
     sendLoginEmail :: Email -- ^ The email to send to
                    -> Text  -- ^ The URL that will log the user in
-                   -> HandlerT master IO ()
+                   -> HandlerFor master ()
 
     -- | Get a user by their email address. Used to determine if the user exists or not.
-    getUserByEmail :: Email -> HandlerT master IO (Maybe (AuthId master))
+    getUserByEmail :: Email -> HandlerFor master (Maybe (AuthId master))
 
     -- | Get a Hash by a TokenId.
     --
@@ -221,7 +244,7 @@ class YesodAuthPersist master => NoPasswordAuth master where
     -- Equally we do not want to pass the user's ID or email address in a URL
     -- if we don't have to, so instead we look up users by the 'TokenId' that
     -- we issued them earlier in the process.
-    getEmailAndHashByTokenId :: TokenId -> HandlerT master IO (Maybe (Email, Hash))
+    getEmailAndHashByTokenId :: TokenId -> HandlerFor master (Maybe (Email, Hash))
 
     -- | Update a user's login hash
     --
@@ -232,27 +255,33 @@ class YesodAuthPersist master => NoPasswordAuth master where
     -- /It is recommended that the/ 'TokenId' /storage be enforced as unique/.
     -- For this reason, the token is not passed as a maybe, as some storage
     -- backends treat `NULL` values as the same.
-    updateLoginHashForUser :: (AuthId master) -> Maybe Hash -> TokenId -> HandlerT master IO ()
+    updateLoginHashForUser :: AuthId master -> Maybe Hash -> TokenId -> HandlerFor master ()
 
     -- | Create a new user with an email address and hash.
-    newUserWithLoginHash :: Email -> Hash -> TokenId -> HandlerT master IO ()
+    newUserWithLoginHash :: Email -> Hash -> TokenId -> HandlerFor master ()
 
     -- | __Optional__ – return a custom token strength.
     --
     -- A token strength of @x@ equates to @2^x@ hash rounds.
-    tokenStrength :: HandlerT master IO Int
+    tokenStrength :: HandlerFor master Int
     tokenStrength = return 17
 
     -- | __Optional__ – return a custom token param name.
-    tokenParamName :: HandlerT master IO Text
+    tokenParamName :: HandlerFor master Text
     tokenParamName = return "tkn"
 
-    {-
-        MINIMAL loginRoute
-              , emailSentRoute
+    -- | __Optional__ – return a custom referer param name.
+    refererParamName :: HandlerFor master Text
+    refererParamName = return "referer"
+
+    -- | __Optional__ – return a custom login redirect param name.
+    redirectParamName :: HandlerFor master Text
+    redirectParamName = return "redirect_to"
+
+    {-# MINIMAL loginRoute
+              , emailSentTarget
               , sendLoginEmail
               , getUserByEmail
               , getEmailAndHashByTokenId
               , updateLoginHashForUser
-              , newUserWithLoginHash
-    -}
+              , newUserWithLoginHash #-}
